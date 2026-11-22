@@ -51,15 +51,65 @@ make bootstrap DAYS=14     # сгенерировать 14 дней истори
 make stream                # запустить «живой» поток: генератор -> Kafka -> Spark Streaming
 ```
 
-<details><summary>Без make (Windows)</summary>
+<details><summary><b>Запуск без make (Windows / PowerShell) — пошагово</b></summary>
 
-```bash
+### 1. Подготовка и запуск контейнеров
+```powershell
+Copy-Item .env.example .env
 docker compose up -d --build
-docker compose run --rm generator static  --out /data/gtfs
+```
+
+> 💡 **Если на ПК 16 ГБ RAM или меньше:**  
+> Рекомендуется в `.env` выставить:
+> ```env
+> SPARK_WORKER_CORES=2
+> SPARK_WORKER_MEMORY=1536m
+> ```
+
+---
+
+### 2. Генерация данных (расписание + 14 дней истории)
+```powershell
+docker compose run --rm generator static --out /data/gtfs
 docker compose run --rm generator history --out /data/raw --days 14
-# затем в Airflow (http://localhost:8081) включите и запустите DAG transit_bootstrap
+```
+
+---
+
+### 3. Обработка данных и обучение модели
+
+**Вариант А — через Airflow (в 1 клик):**
+1. Откройте веб-интерфейс: http://localhost:8081 (`admin` / `admin`).
+2. Включите тумблер (**Unpause**) у DAG **`transit_bootstrap`** и нажмите **Trigger**.
+
+**Вариант Б — через консоль (Spark Submit):**
+```powershell
+# Шаг 1: Загрузка расписания GTFS в озеро (silver/gtfs/sched) и ClickHouse
+docker compose exec spark-master spark-submit jobs/ingest_static.py
+
+# Шаг 2: Загрузка истории в озеро Bronze (bronze/vehicle_positions) и погоды
+docker compose exec spark-master spark-submit jobs/ingest_history.py
+
+# Шаг 3: Расчет прибытий и задержек в озеро Silver (silver/arrivals) и ClickHouse
+docker compose exec spark-master spark-submit jobs/build_arrivals.py --all
+
+# Шаг 4: Обучение модели градиентного бустинга (GBT)
+docker compose exec spark-master spark-submit jobs/train_model.py --days 21 --test-days 3 --sample 0.5
+```
+*(Для машин с ограниченным объёмом RAM на шаге 4 можно указать `--sample 0.2`)*
+
+---
+
+### 4. Запуск живого стриминга (Kafka -> Spark Streaming -> ClickHouse)
+```powershell
 docker compose --profile stream up -d --build producer spark-streaming
 ```
+
+Остановка стриминга:
+```powershell
+docker compose --profile stream stop producer spark-streaming
+```
+
 </details>
 
 | Сервис | Адрес | Логин |
